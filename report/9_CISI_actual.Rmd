@@ -1,0 +1,591 @@
+---
+title: "9_CISI_actual"
+author: "tsuyoshi"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+    code_folding: "hide"
+    pandoc_args: [ 
+      "--output=9_CISI_actual.html" 
+    ]
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+
+---
+
+### setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(ggplot2)
+library(readr)
+library(tidyr)
+library(dplyr)
+library(tibble)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(ggsci)
+```
+
+
+### input data
+```{r specify_paths_1}
+
+project.path <- "/mnt/projects/data/publication_2/9_CISI_actual"
+# Specify input paths
+genewise.path <- file.path(project.path,"result_genewise.csv")
+cisich.path <- file.path(project.path,"result_cisich_corr.csv")
+summary.path <- file.path(project.path,"result_summary.csv")
+```
+
+```{r}
+df_summary <- read.csv(summary.path,  row.names = 'X') 
+df_genewise <- read_csv(genewise.path,show_col_types = F) 
+df_cisich <- read.csv(cisich.path,  row.names = 'X')
+```
+
+
+```{r reshape_df}
+# pivot longer for ggplot
+df_summary$Condition <- rownames(df_summary)
+df_summary <-df_summary %>% 
+  pivot_longer(c('Gene_average','Gene_minimum','Cell_average'), 
+               names_to = "value_type", values_to = "Correlation")
+
+df_genewise <- df_genewise %>% 
+  `colnames<-`(sub("...1","Condition",colnames(.), fixed = T) ) %>%
+  pivot_longer(!Condition, names_to = "Marker", values_to = "Correlation")
+
+df_cisich$cisi_channel <- rownames(df_cisich)
+df_cisich <- df_cisich %>%
+  pivot_longer(!cisi_channel, names_to = "Condition", values_to = "Correlation")
+```
+
+### plot summary
+```{r, results="asis",fig.height = 3, fig.width =8, fig.align = "center"}
+ggplot(df_summary, 
+       aes(x = Condition, y = Correlation, fill = Condition)) + 
+  facet_wrap(~value_type) +
+  geom_bar(stat = "identity") + theme_bw() + xlab(NULL) + 
+  scale_y_continuous(expand = c(0,0),limits = c(0,1)) +
+  scale_fill_npg() +
+  # geom_text(aes(label = sprintf("%.3f",Correlation)), vjust = -0.3) +
+  theme(axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(),
+        panel.border = element_blank(), 
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold", size = 12),
+        axis.line = element_line())
+```
+
+### plot all conditions for all proteins
+```{r, results="asis",fig.height = 3, fig.width =8, fig.align = "center"}
+ggplot(df_genewise, 
+       aes(x = reorder(Marker, Correlation), y = Correlation, fill = Condition, group = Condition)) +
+  geom_col(position =  position_dodge2(padding = 0.2),width = 0.7 ) + theme_bw() +
+  xlab("Marker") + scale_y_continuous(expand = c(0,0),limits = c(0,1)) + scale_fill_npg() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        panel.border = element_blank(), 
+        axis.line = element_line())
+```
+
+### plot Actual for all proteins
+```{r, results="asis",fig.height = 3, fig.width =6, fig.align = "center"}
+ggplot(df_genewise[df_genewise$Condition == "Actual",], 
+       aes(x = reorder(Marker, Correlation), y = Correlation)) +
+  geom_col(width = 0.7 , fill = "grey35") + theme_bw() +
+  xlab("Marker") + scale_y_continuous(expand = c(0,0),limits = c(0,1)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),panel.border = element_blank(), axis.line = element_line()) 
+```
+
+
+### read A
+```{r}
+# read A
+A_path <- "/mnt/projects/data/publication/9_CISI_actual/A.csv"
+A <- read_csv(A_path,show_col_types = F) %>% column_to_rownames("...1")
+A[A > 0] <- "labeled"
+A[A == 0] <- "unlabeled"
+```
+
+### plot A and Ahat
+```{r, results="asis",fig.height = 5, fig.width = 3, fig.align = "center"}
+
+h1 <- Heatmap(t(A),
+              col = c("unlabeled" = "white", "labeled" = "darkorange"),
+              show_heatmap_legend = F, 
+              cluster_columns = F, cluster_rows = F, # column_title = 'Correlation of \nactual_vs_simulated Y', 
+              border = TRUE,rect_gp = gpar(col = "gray90", lwd = 1),
+              top_annotation = columnAnnotation(
+                corr = anno_barplot(df_cisich[df_cisich$Condition=='actual_vs_simulated_A',]$Correlation),
+                height = unit(3, "cm"),show_annotation_name = FALSE))
+
+h1
+
+```
+
+## single-cell analyses
+
+### load additional libraries
+```{r}
+library(SingleCellExperiment)
+library(zellkonverter)
+library(doParallel)
+library(scater)
+library(uwot)
+library(caret)
+library(ROSE)
+library(colorRamp2)
+library(pROC)
+```
+
+
+### set input
+```{r specify_paths_2}
+# Specify input paths
+sce_gt.path <- file.path(project.path,"sce/sce_gt.h5ad")
+sce_dc.path <- file.path(project.path,"sce/sce_dc_Actual.h5ad")
+
+```
+
+### input sces
+```{r}
+# read h5ad to sce
+sce_gt <- readH5AD(sce_gt.path) 
+sce_dc <- readH5AD(sce_dc.path)
+
+# combine sces into list
+SCE <- list(sce_gt,sce_dc)
+names(SCE) <- c("ground_truth", "decompressed" )
+```
+
+
+
+### add arcsinh transformed and scaled counts
+```{r add_exprs_scaled}
+# set function for scaling
+scale_sce <- function(sce, assay = "exprs", percent = 0.9999){
+  # assay(sce, "exprs") <- asinh(assay(sce, "counts") / 2)
+  es <- assay(sce, assay)
+  qs <- rowQuantiles(es, probs = c(0.0, percent))
+  x <- (es - qs[, 1]) / (qs[, 2] - qs[, 1])
+  x[x < 0] <- 0; x[x > 1] <- 1
+  return(x)
+}
+
+SCE <- lapply(SCE, function(sce) {
+              assay(sce, "exprs") <- asinh(counts(sce)/1)
+              assay(sce, "scaled") <- scale_sce(sce)
+              sce
+            })
+
+```
+
+
+### run UMAP
+```{r runUMAP}
+SCE <- lapply(SCE, function(sce){
+  set.seed(240508)
+  sce <- runUMAP(sce, exprs_values="exprs", n_threads = 20)
+  sce
+})
+```
+
+### train Random forest classfier using ground truth data
+```{r}
+sce <- SCE$ground_truth
+```
+
+#### make labels for training based on threshold of scaled expression
+```{r}
+label_df <- 
+  data.frame(Neut = as.numeric(assay(sce["MPO",],"scaled") > 0.3), 
+             Fibro = as.numeric(assay(sce["SMA",],"scaled") > 0.7), 
+             Endo = as.numeric(assay(sce["CD31",],"scaled") > 0.5), 
+             Plasma = as.numeric(assay(sce["CD38",],"scaled") > 0.5), 
+             NK = as.numeric(assay(sce["CD7",],"scaled") > 0.6 & 
+                             assay(sce["CD3",],"scaled") < 0.2 & 
+                             assay(sce["CD4",],"scaled") < 0.2 & 
+                             assay(sce["CD8a",],"scaled") < 0.2), 
+             migDC = as.numeric(assay(sce["DC-LAMP",],"scaled") > 0.5), 
+             pDC = as.numeric(assay(sce["CD303",],"scaled") > 0.7), 
+             Macro1 = as.numeric(assay(sce["CD68",],"scaled") > 0.6 ),
+             Macro2 = as.numeric(assay(sce["CD163",],"scaled") > 0.5), 
+             B = as.numeric(assay(sce["CD20",],"scaled") > 0.4),
+             Tc = as.numeric(assay(sce["CD8a",],"scaled") > 0.4 & 
+                             assay(sce["CD4",],"scaled") < 0.4), 
+             Treg = as.numeric(assay(sce["FOXP3",],"scaled") > 0.6 & 
+                               assay(sce["CD3",],"scaled") > 0.1), 
+             Th = as.numeric(assay(sce["CD4",],"scaled") > 0.5 & 
+                             assay(sce["CD3",],"scaled") > 0.1 & 
+                             assay(sce["FOXP3",],"scaled") < 0.5 & 
+                             assay(sce["CD8a",],"scaled") < 0.3))
+```
+
+#### make final labels by selecting one cell type for the cells with multiple labels
+```{r}
+# define markers that define celltypes
+celltypes <- c("Neut","Fibro","Endo" ,"Plasma","NK","migDC","pDC","Macro1","Macro2","B","Tc","Treg","Th")
+markers <- c("MPO","SMA","CD31","CD38","CD7","DC-LAMP","CD303","CD68","CD163","CD20","CD4","FOXP3","CD8a")
+
+# get celltype based on max marker expression (only used when multiple labels were assigned to a cell)
+label_mat <- label_df %>% as.matrix() %>% t() # convert to matrix
+max_celltype <- 
+  (assay(sce[markers,],"scaled") * label_mat) %>% apply(2, which.max) %>% celltypes[.] 
+
+# get final labeled cells by selecting "max_celltype" when multiple labels were assigned
+RF_manual_label <- 
+  ifelse(rowSums(label_df) > 1, max_celltype, 
+    ifelse(rowSums(label_df) == 1, colnames(label_df)[apply(label_df, 1, which.max)],"unlabeled")) 
+
+sce$RF_manual_label <- RF_manual_label
+
+```
+
+#### train RF with ROSE sampling for balancing the dataset
+```{r}
+# for parallel processing
+ncore <- 15
+cl <- makePSOCKcluster(ncore)
+registerDoParallel(cl)
+
+# Split between labeled and unlabeled cells
+lab_spe <- sce[,sce$RF_manual_label != "unlabeled"]
+unlab_spe <- sce[,sce$RF_manual_label == "unlabeled"]
+
+
+# Randomly split into train and test data
+set.seed(4)
+trainIndex <- createDataPartition(factor(lab_spe$RF_manual_label), p = 0.75)
+
+train_spe <- lab_spe[,trainIndex$Resample1]
+test_spe <- lab_spe[,-trainIndex$Resample1]
+
+# get scaled count and
+# ROSE smaple for the minor cell types 
+train_df <- as.data.frame(t(assay(train_spe, "scaled"))) %>% mutate(RF_manual_label = factor(train_spe$RF_manual_label))
+# find the most major cell type (= "max_xelltype"). All the other cell types will be minor cell types.
+max_celltype <- table(train_spe$RF_manual_label) %>% which.max() %>% names()
+# repeat ROSE sample for all minor cell types with "max_celltype"
+rose_df <- 
+  lapply(celltypes[celltypes !=max_celltype], function(ct){
+    subdf <- train_df[train_df$RF_manual_label %in% c(max_celltype, ct),]
+    col_ori <- colnames(subdf)
+    colnames(subdf) <- col_ori %>% gsub("-","_",.) # remove "-" as it causes error in ROSE
+    rose_subdf <- ROSE(formula = RF_manual_label ~ ., data  = subdf)$data     
+    colnames(rose_subdf) <- col_ori # put back after ROSE
+    rose_subdf
+  }) %>% do.call("rbind",.)
+# down sample "max_celltype" to the mean number of cells for all the other cell classes
+n <- table(rose_df$RF_manual_label)[names(table(rose_df$RF_manual_label)) != max_celltype] %>% mean() %>% as.integer()
+# combine all the minor cell types with ROSE sampling and down sampled "max_celltype"
+rose_df <-rbind(rose_df[sample(which(rose_df$RF_manual_label == max_celltype), n),] , rose_df[rose_df$RF_manual_label != max_celltype,])
+
+# get matrix for training
+cur_mat <- as.matrix(rose_df[,-ncol(rose_df)]) 
+
+# Define fit parameters for 5-fold cross validation
+fitControl <- trainControl(method = "cv",
+                           number = 5)
+# Train a random forest classifier
+set.seed(4)
+rffit_gt <- train(x = cur_mat, 
+                  y = rose_df$RF_manual_label,
+                  method = "rf", 
+                  ntree = 1000,
+                  tuneLength = 5,
+                  trControl = fitControl)
+rffit_gt
+
+# Predict the cell phenotype labels of the test data
+cur_pred <- predict(rffit_gt, newdata = t(assay(test_spe, "scaled")))
+cm <- confusionMatrix(data = cur_pred, 
+                      reference = factor(test_spe$RF_manual_label), 
+                      mode = "everything")
+print(cm)
+
+
+stopCluster(cl)
+```
+
+
+
+### Repeat training Random forest classfier using decompressed data
+```{r}
+sce <- SCE$decompressed
+```
+
+#### make labels for training based on threshold of scaled expression
+```{r}
+label_df <- 
+  data.frame(Neut = as.numeric(assay(sce["MPO",],"scaled") > 0.3), 
+             Fibro = as.numeric(assay(sce["SMA",],"scaled") > 0.7), 
+             Endo = as.numeric(assay(sce["CD31",],"scaled") > 0.5), 
+             Plasma = as.numeric(assay(sce["CD38",],"scaled") > 0.5), 
+             NK = as.numeric(assay(sce["CD7",],"scaled") > 0.6 & 
+                             assay(sce["CD3",],"scaled") < 0.2 & 
+                             assay(sce["CD4",],"scaled") < 0.2 & 
+                             assay(sce["CD8a",],"scaled") < 0.2), 
+             migDC = as.numeric(assay(sce["DC-LAMP",],"scaled") > 0.5), 
+             pDC = as.numeric(assay(sce["CD303",],"scaled") > 0.7), 
+             Macro1 = as.numeric(assay(sce["CD68",],"scaled") > 0.6 ),
+             Macro2 = as.numeric(assay(sce["CD163",],"scaled") > 0.5), 
+             B = as.numeric(assay(sce["CD20",],"scaled") > 0.4),
+             Tc = as.numeric(assay(sce["CD8a",],"scaled") > 0.4 & 
+                             assay(sce["CD4",],"scaled") < 0.4), 
+             Treg = as.numeric(assay(sce["FOXP3",],"scaled") > 0.6 & 
+                               assay(sce["CD3",],"scaled") > 0.1), 
+             Th = as.numeric(assay(sce["CD4",],"scaled") > 0.5 & 
+                             assay(sce["CD3",],"scaled") > 0.1 & 
+                             assay(sce["FOXP3",],"scaled") < 0.5 & 
+                             assay(sce["CD8a",],"scaled") < 0.3))
+```
+
+#### make final labels by selecting one cell type for the cells with multiple labels
+```{r}
+# define markers that define celltypes
+celltypes <- c("Neut","Fibro","Endo" ,"Plasma","NK","migDC","pDC","Macro1","Macro2","B","Tc","Treg","Th")
+markers <- c("MPO","SMA","CD31","CD38","CD7","DC-LAMP","CD303","CD68","CD163","CD20","CD4","FOXP3","CD8a")
+
+# get celltype based on max marker expression (only used when multiple labels were assigned to a cell)
+label_mat <- label_df %>% as.matrix() %>% t() # convert to matrix
+max_celltype <- 
+  (assay(sce[markers,],"scaled") * label_mat) %>% apply(2, which.max) %>% celltypes[.] 
+
+# get final labeled cells by selecting "max_celltype" when multiple labels were assigned
+RF_manual_label <- 
+  ifelse(rowSums(label_df) > 1, max_celltype, 
+    ifelse(rowSums(label_df) == 1, colnames(label_df)[apply(label_df, 1, which.max)],"unlabeled")) 
+
+sce$RF_manual_label <- RF_manual_label
+# RF_manual_label %>% table()
+```
+
+#### train RF with ROSE sampling for balancing the dataset
+```{r}
+# for parallel processing
+cl <- makePSOCKcluster(ncore)
+registerDoParallel(cl)
+
+# Split between labeled and unlabeled cells
+lab_spe <- sce[,sce$RF_manual_label != "unlabeled"]
+unlab_spe <- sce[,sce$RF_manual_label == "unlabeled"]
+
+
+# Randomly split into train and test data
+set.seed(4)
+trainIndex <- createDataPartition(factor(lab_spe$RF_manual_label), p = 0.75)
+
+train_spe <- lab_spe[,trainIndex$Resample1]
+test_spe <- lab_spe[,-trainIndex$Resample1]
+
+# get scaled count and
+# ROSE smaple for the minor cell types 
+train_df <- as.data.frame(t(assay(train_spe, "scaled"))) %>% mutate(RF_manual_label = factor(train_spe$RF_manual_label))
+# find the most major cell type (= "max_xelltype"). All the other cell types will be minor cell types.
+max_celltype <- table(train_spe$RF_manual_label) %>% which.max() %>% names()
+# repeat ROSE sample for all minor cell types with "max_celltype"
+rose_df <- 
+  lapply(celltypes[celltypes !=max_celltype], function(ct){
+    subdf <- train_df[train_df$RF_manual_label %in% c(max_celltype, ct),]
+    col_ori <- colnames(subdf)
+    colnames(subdf) <- col_ori %>% gsub("-","_",.) # remove "-" as it causes error in ROSE
+    rose_subdf <- ROSE(formula = RF_manual_label ~ ., data  = subdf)$data     
+    colnames(rose_subdf) <- col_ori # put back after ROSE
+    rose_subdf
+  }) %>% do.call("rbind",.)
+# down sample "max_celltype" to the mean number of cells for all the other cell classes
+n <- table(rose_df$RF_manual_label)[names(table(rose_df$RF_manual_label)) != max_celltype] %>% mean() %>% as.integer()
+# combine all the minor cell types with ROSE sampling and down sampled "max_celltype"
+rose_df <-rbind(rose_df[sample(which(rose_df$RF_manual_label == max_celltype), n),] , rose_df[rose_df$RF_manual_label != max_celltype,])
+
+# get matrix for training
+cur_mat <- as.matrix(rose_df[,-ncol(rose_df)]) 
+
+# Define fit parameters for 5-fold cross validation
+fitControl <- trainControl(method = "cv",
+                           number = 5)
+# Train a random forest classifier
+set.seed(4)
+rffit_dc <- train(x = cur_mat, 
+                  y = rose_df$RF_manual_label,
+                  method = "rf", 
+                  ntree = 1000,
+                  tuneLength = 5,
+                  trControl = fitControl)
+rffit_dc
+
+# Predict the cell phenotype labels of the test data
+cur_pred <- predict(rffit_dc, newdata = t(assay(test_spe, "scaled")))
+cm <- confusionMatrix(data = cur_pred, 
+                      reference = factor(test_spe$RF_manual_label), 
+                      mode = "everything")
+print(cm)
+
+
+stopCluster(cl)
+```
+
+### save trained RF classifier
+```{r}
+# save rffit 
+out.path <- file.path(project.path, "RF")
+if (!dir.exists(out.path)) {dir.create(out.path, recursive=TRUE)}
+saveRDS(rffit_gt, file.path(out.path,"rffit_gt.rds"))
+saveRDS(rffit_dc, file.path(out.path,"rffit_dc.rds"))
+
+```
+
+### predict cell types using trained RF classifier
+```{r}
+set.seed(2404)
+# cell types according to the max probability predicted by RF
+cell_class_gt <- as.character(predict(rffit_gt, newdata = t(assay(SCE$ground_truth, "scaled")), type = "raw"))
+cell_class_dc <- as.character(predict(rffit_dc, newdata = t(assay(SCE$decompressed, "scaled")), type = "raw"))
+# predicted cell type probability for each cell
+cell_prob_gt <- predict(rffit_gt, newdata = t(assay(SCE$ground_truth, "scaled")), type = "prob")
+cell_prob_dc <- predict(rffit_dc, newdata = t(assay(SCE$decompressed, "scaled")), type = "prob")
+```
+
+### recall/precision/f1
+```{r, results="asis",fig.height = 4, fig.width = 8, fig.align = "center"}
+# filter undefined cells (maximum probability lower than 0.8)  
+defined_cells <- rowMax(as.matrix(cell_prob_gt)) > 0.8
+celltype_ann_gt <- cell_class_gt[defined_cells]
+celltype_ann_dc <- cell_class_dc[defined_cells]
+# calculate normalized confusion matrix (mat1: row_wise, mat2: col_wise)
+mat1 <- table(celltype_ann_gt, celltype_ann_dc) %>% prop.table(margin = 1)
+mat2 <- table(celltype_ann_gt, celltype_ann_dc) %>% prop.table(margin = 2)
+
+h1 <- Heatmap(mat1, name = "Proportion\neach_row",  
+        column_title = "Decompressed", row_title = "Ground_truth",
+        cluster_columns = F, cluster_rows = F, border_gp = gpar(col = "black", lty = 1),
+        width = ncol(mat1)*unit(5, "mm"), height = nrow(mat1)*unit(5, "mm"),
+        col = colorRamp2(c(0, 1), c("white", "navy")),rect_gp = gpar(col = "gray", lwd = 1))  
+h2 <- Heatmap(mat2, name = "Proportion\neach_col",  
+        column_title = "Decompressed", row_title = "Ground_truth",
+        cluster_columns = F, cluster_rows = F, border_gp = gpar(col = "black", lty = 1),
+        width = ncol(mat2)*unit(5, "mm"), height = nrow(mat2)*unit(5, "mm"),
+        col = colorRamp2(c(0, 1), c("white", "firebrick4")),rect_gp = gpar(col = "gray", lwd = 1))  
+draw(h1+h2)
+```
+
+
+```{r, results="asis",fig.height = 3, fig.width = 5, fig.align = "center"}
+recall <- diag(mat1) 
+precision <- diag(mat2)
+f1 <- 2*recall*precision/(recall + precision)
+df <- data.frame(Recall = recall, Precision = precision, F1 = f1, Cell_types = names(f1), 
+                 ncell_gt = as.vector(table(celltype_ann_gt)), ncell_dc = as.vector(table(celltype_ann_dc)))
+p <- 
+  ggplot(df, aes(x= Cell_types, y = F1))+  
+  geom_col(width = 0.7, position = position_dodge2(), fill = "grey35") + theme_bw() + scale_y_continuous(expand = c(0,0), limits = c(0,1)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),panel.border = element_blank(), axis.line = element_line())  
+print(p)
+```
+```{r}
+cat("mean F1/recall/precision/ncells: ", mean(f1),"/", mean(recall), "/", mean(precision),"/", table(defined_cells)["TRUE"],"\n" )
+```
+
+
+### mean AUROC for all cell types 
+```{r, results="asis",fig.height = 3, fig.width = 5, fig.align = "center"}
+# filter undefined cells (maximum probability lower than 0.8)  
+defined_cells <- rowMax(as.matrix(cell_prob_gt)) > 0.8
+# calculate AUROC for all cell types. Each ROC is calculated for one vs others.
+df <-
+  sapply(celltypes,function(cur_type){
+    auc <- auc(ifelse(cell_class_gt[defined_cells] == cur_type, cur_type, "others"),
+               cell_prob_dc[defined_cells,cur_type])
+    auc
+    }) %>% data.frame(AUROC = .) %>% mutate(Cell_types = rownames(.)) 
+
+ggplot(df, aes(x = Cell_types, y = AUROC)) +
+  geom_col(width = 0.7 , fill = "grey35") + theme_bw() +
+  scale_y_continuous(expand = c(0,0)) + coord_cartesian(ylim = c(0.5,1)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),panel.border = element_blank(), axis.line = element_line()) 
+```
+```{r}
+cat("Mean AUROC is:", mean(df$AUROC))
+```
+
+### Visualize marker expression for each cell type defined by RF from ground_truth or decompressed data
+```{r}
+SCE$ground_truth$RF <- ifelse(defined_cells, cell_class_gt, "undefined")
+SCE$decompressed$RF <- ifelse(defined_cells, cell_class_dc, "undefined")
+```
+
+```{r, results="asis",fig.height = 4.5, fig.width =8, fig.align = "center"}
+
+# take median marker expression for each cell types
+# RF based on GT data
+if (!"undefined" %in% celltypes) celltypes <- c(celltypes,"undefined")
+
+h1 <- 
+  as.data.frame(t(assay(SCE$ground_truth,"scaled"))) %>% 
+  mutate(RF = SCE$ground_truth$RF) %>% 
+  group_by(RF)  %>% 
+  summarise(across(everything(), median)) %>%
+  column_to_rownames("RF") %>% 
+  Heatmap(col = c("white","firebrick4"), rect_gp = gpar(col = "grey", lwd = 1), border_gp = gpar(col = "black", lty = 1), 
+          column_order = rownames(SCE$ground_truth), column_title = "Ground truth expression", row_order = celltypes,
+          width = ncol(.)*unit(5, "mm"), height = nrow(.)*unit(5, "mm"),
+          heatmap_legend_param = list(title = "Scaled_GT"))
+
+h2 <- 
+  as.data.frame(t(assay(SCE$decompressed,"scaled"))) %>% 
+  mutate(RF = SCE$ground_truth$RF) %>% 
+  group_by(RF)  %>% 
+  summarise(across(everything(), median)) %>%
+  column_to_rownames("RF") %>% 
+  Heatmap(col = c("white","navy"), rect_gp = gpar(col = "grey", lwd = 1), border_gp = gpar(col = "black", lty = 1), 
+          column_order = rownames(SCE$ground_truth), column_title = "Decompressed expression", row_order = celltypes,
+          width = ncol(.)*unit(5, "mm"), height = nrow(.)*unit(5, "mm"),
+          heatmap_legend_param = list(title = "Scaled_DC"))
+
+draw(h1 + h2 ,column_title = "RFclusters_Groundtruth")
+
+# draw(h1 + h2 +rowAnnotation(ncells = row_anno_barplot(as.vector(table(SCE$gt$RF))))  ,column_title = "RFclusters_Groundtruth")
+
+# take median marker expression for each cell types
+# RF based on Dc data this time
+h1 <- 
+  as.data.frame(t(assay(SCE$ground_truth,"scaled"))) %>% 
+  mutate(RF = SCE$decompressed$RF) %>% 
+  group_by(RF)  %>% 
+  summarise(across(everything(), median)) %>%
+  column_to_rownames("RF") %>% 
+  Heatmap(col = c("white","firebrick4"), rect_gp = gpar(col = "grey", lwd = 1), border_gp = gpar(col = "black", lty = 1), 
+          column_order = rownames(SCE$ground_truth), column_title = "Ground truth expression", row_order = celltypes,
+          width = ncol(.)*unit(5, "mm"), height = nrow(.)*unit(5, "mm"),
+           heatmap_legend_param = list(title = "Scaled_GT"))
+
+h2 <- 
+  as.data.frame(t(assay(SCE$decompressed,"scaled"))) %>% 
+  mutate(RF = SCE$decompressed$RF) %>% 
+  group_by(RF)  %>% 
+  summarise(across(everything(), median)) %>%
+  column_to_rownames("RF") %>% 
+  Heatmap(col = c("white","navy"), rect_gp = gpar(col = "grey", lwd = 1), border_gp = gpar(col = "black", lty = 1), 
+          column_order = rownames(SCE$ground_truth), column_title = "Decompressed expression",row_order = celltypes,
+          width = ncol(.)*unit(5, "mm"), height = nrow(.)*unit(5, "mm"),
+          heatmap_legend_param = list(title = "Scaled_DC"))
+
+draw(h1 + h2, column_title = "RFclusters_Decompressed")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

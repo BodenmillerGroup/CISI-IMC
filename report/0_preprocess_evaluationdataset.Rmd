@@ -1,0 +1,86 @@
+---
+title: "0_preprocess_evaluationdataset"
+author: "tsuyoshi"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+    code_folding: "hide"
+    pandoc_args: [ 
+      "--output=0_preprocess_evaluationdataset.html" 
+    ]
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+
+---
+
+After Steinbock pipeline, run this preprocess files to add channel information and core_id.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(SingleCellExperiment)
+library(imcRtools)
+library(zellkonverter)
+library(readr)
+library(stringr)
+library(dplyr)
+```
+
+
+```{r specify_paths}
+
+project.path <- "/mnt/projects/data/0_preprocess_th192"
+# Specify input paths
+steinbock.paths <- file.path(project.path,"steinbock_cthpf")
+  
+
+meta.paths <- file.path(steinbock.paths, "images.csv")
+images.paths <- file.path(steinbock.paths, "img")
+masks.paths <- file.path(steinbock.paths, "masks")
+
+# # path to phi
+# phi.path <- file.path(project.path,"steinbock","phi.csv")
+# Specify output path
+out.path <- file.path("/mnt/projects/data/publication_2/0_preprocess_evaluationdataset")
+# Create output directory if id doesn't exist
+if (!dir.exists(out.path)) {dir.create(out.path, recursive=TRUE)}
+```
+
+
+## read sce and metadata files
+```{r read_input_data}
+sce <- read_steinbock(steinbock.paths, graphs_folder=NULL, regionprops_folder = NULL)
+meta <- read_csv(meta.paths, show_col_types = FALSE)
+```
+
+
+## Add rowdata
+```{r}
+# path to panel
+panel.path <- file.path(steinbock.paths,"panel.csv")
+panel <- read_csv(panel.path,show_col_types = F)
+
+#set rownames
+rownames(sce) <- panel$name[match(rowData(sce)$channel, panel$channel)] 
+
+# set channel_type (CISI or GT or Extra)
+rowData(sce)$channel_type <- rownames(sce) %>% str_split('_') %>% lapply('[[', 1) %>% unlist()
+
+rowData(sce)
+```
+
+
+## Add colData
+```{r add_tissue_annotation}
+sce$core_id <- meta$acquisition_description[match(paste0(sce$sample_id,".tiff"), meta$image)] 
+```
+
+
+## save  SCE
+```{r}
+writeH5AD(SingleCellExperiment(list(counts=assay(sce, "counts")),
+                                 colData=colData(sce),
+                                 rowData=rowData(sce)), file=file.path(out.path, "sce.h5ad"))
+```
+
